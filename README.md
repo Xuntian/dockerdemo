@@ -14,3 +14,6 @@ docker build -t xuntian/dockerdemo ./
 ##  docker pull xuntian/dockerdemo
 docker run -dti --name dockerdemo -p 80:8099 xuntian/dockerdemo
 ```
+
+3. 查看结果
+浏览器访问 http://{ip}:80 即可
