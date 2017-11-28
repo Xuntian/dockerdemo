@@ -1,0 +1,12 @@
+<?npl
+
+local _url = request:url();
+local _method = request:GetMethod();
+
+if(_url:match("/"))then
+	include_once("./hello/index.page");
+end
+
+
+
+?>
