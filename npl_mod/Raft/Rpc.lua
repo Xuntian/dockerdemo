@@ -48,7 +48,7 @@ Rpc.monitorPeriod = 10000
 function Rpc:new(o)
   o = o or {}
   o.logger = logger
-  o.thread_name = format("(%s)", __rts__:GetName())
+  o.thread_name = format("%s", __rts__:GetName())
   o.MaxWaitSeconds = 3
   o.request = {
     type = "run",
@@ -109,7 +109,7 @@ end
 -- @return index or nil
 function Rpc:PushCallback(callbackFunc, timeout)
   if (not callbackFunc) then
-    return -1
+    return
   end
   local index = getNextId()
   callbackQueue[index] = {callbackFunc = callbackFunc, startTime = ParaGlobal.timeGetTime(), timeout = timeout}
@@ -191,51 +191,40 @@ function Rpc.GetInstance(name)
   return rpc_instances[name or ""]
 end
 
-local added_runtime = {}
 -- private: whenever a message arrives
+local added_runtime = {}
 function Rpc:OnActivated(msg)
-  -- this is for tracing raft client
-  -- if type(self.localAddress) == "table" then
-    -- self.logger.trace("recv:")
-    -- self.logger.trace(msg)
-  -- end
   if (msg.tid) then
     -- unauthenticated? reject as early as possible or accept it.
     local messageType = msg.msg.messageType
     if (messageType) then
       local remoteAddress = msg.remoteAddress
-      if
-        messageType.int == RaftMessageType.ClientRequest.int or messageType.int == RaftMessageType.AddServerRequest.int or
-          messageType.int == RaftMessageType.RemoveServerRequest.int
-       then
-        -- we got a client request
-        if not added_runtime[remoteAddress.id] then
-          added_runtime[remoteAddress.id] = true
-          -- can not contain ':'
-          local nid = string.sub(remoteAddress.id, 1, #remoteAddress.id - 1)
-          -- local nid = "server" .. remoteAddress.id;
-          self.logger.info("accepted nid is %s", nid)
+      local serverId = msg.msg.source
+      local nid = serverId and format("server%s", serverId) or nil
+      if type(remoteAddress) == "table" then
+        -- a client request
+        serverId = remoteAddress.id
+        nid = format("server%s", serverId)
+        if not added_runtime[nid] then
+          added_runtime[nid] = true
+
           NPL.AddNPLRuntimeAddress({host = remoteAddress.host, port = remoteAddress.port, nid = nid})
+          RaftRequestRPCInit(nil, serverId, {})
         end
-        RaftRequestRPCInit(nil, remoteAddress.id, {})
-        NPL.accept(msg.tid, remoteAddress.id or "default_user")
-        msg.nid = remoteAddress.id or "default_user"
-        self.logger.info("connection %s is established and accepted as %s, a client request", msg.tid, msg.nid)
-      else
-        -- this must be Raft internal message exclude the above 3
-        if msg.msg.source then
-          remoteAddress = "server" .. msg.msg.source .. ":"
-        end
-        self.logger.trace("recv msg %s", util.table_tostring(msg))
-        NPL.accept(msg.tid, remoteAddress or "default_user")
-        msg.nid = remoteAddress or "default_user"
-        self.logger.info("connection %s is established and accepted as %s, raft internal request", msg.tid, msg.nid)
       end
+
+      NPL.accept(msg.tid, nid)
+      self.logger.info("connection %s is established and accepted as %s", msg.tid, nid)
+      msg.nid = nid
+      msg.tid = nil
     else
-      if msg.name then
-        -- for client rsp in state machine
-        NPL.accept(msg.tid, msg.tid)
-        self.logger.info("connection %s is established and accepted as %s, client response", msg.tid, msg.nid)
+      if msg.name and msg.remoteAddress then
+        -- a client response
+        local nid = format("server%s", msg.remoteAddress)
+        NPL.accept(msg.tid, nid)
+        self.logger.info("connection %s is established and accepted as %s, client response", msg.tid, nid)
+        msg.nid = nid
+        msg.tid = nil
       else
         self.logger.info("who r u? msg:%s", util.table_tostring(msg))
         NPL.reject(msg.tid)
@@ -256,23 +245,17 @@ function Rpc:OnActivated(msg)
     if (msg.type == "run") then
       local result, err = self:handle_request(msg.msg)
       if not result then
-        self.logger.trace("result is null")
+        -- self.logger.trace("result is null")
         return
       end
-      if type(msg.remoteAddress) == "table" and msg.remoteAddress.id then
-        msg.remoteAddress = msg.remoteAddress.id
-      end
-      -- here we could use msg.nid or msg.remoteAddress
-      -- be clear about the nid!
-      local vFileId = format("%s%s%s", msg.callbackThread, msg.nid, self.filename)
+
+      local vFileId = format("(%s)%s:%s", msg.callbackThread, msg.nid, self.filename)
       self.response.name = self.fullname
       self.response.msg = result
       self.response.err = err
-      self.response.remoteAddress = self.localAddress -- on the server side the local address is nil
+      self.response.remoteAddress = msg.localAddress
       self.response.callbackId = msg.callbackId
-      -- if type(self.localAddress) == "table" then
-      -- self.logger.trace("activate on %s, msg:%s", vFileId, util.table_tostring(response))
-      -- end
+
       local activate_result = NPL.activate(vFileId, self.response)
 
       if activate_result ~= 0 then
@@ -310,54 +293,40 @@ function Rpc:MakePublic()
   NPL.AddPublicFile(self.filename, shortValue)
 end
 
--- @param address: if nil, it is current NPL thread. it can be thread name like "(worker1)"
--- if NPL thread worker1 is not created, it will be automatically created.
--- Because NPL thread is reused, it is good practice to use only limited number of NPL threads per process.
--- for complete format, please see NPL.activate function.
--- @param msg: any table object
--- @param callbackFunc: result from the Rpc, function(err, msg) end
--- @param timeout:  time out in milliseconds. if nil, there is no timeout
--- if timed out callbackFunc("timeout", nil) is invoked on timeout
-function Rpc:activate(localAddress, remoteAddress, msg, callbackFunc, timeout)
-  -- local address = remoteAddress
-  -- if(type(address) == "string") then
-  --   local thread_name = address:match("^%((.+)%)$");
-  --   if (thread_name) then
-  --     self.workers = self.workers or {};
-  --     if(not self.workers[address]) then
-  --       self.workers[address] = true;
-  --       NPL.CreateRuntimeState(thread_name, 0):Start();
-  --     end
-  --   end
-  -- end
-  -- thread_name = thread_name or "osAsync";
-  -- NPL.CreateRuntimeState(thread_name, 0):Start();
-  self.localAddress = localAddress
-  self.remoteAddress = remoteAddress
-  -- if type(self.localAddress) == "table" then
-  --   self.localAddress.id = format("server%s:", self.localAddress.id);
-  -- end
+-- localAddress is server id for raft internal msg, and a table for client request
+-- for client request the table looks like below
+--   local localAddress = {
+--     host = host or "localhost",
+--     port = port or "9004",
+--     id = id or "4"
+--   }
+-- remoteAddress is always a server id
+function Rpc:activate(localAddress, remoteAddress, msg, callbackFunc, remoteThread)
   -- TTL Cache
   self:OneTimeInit()
   local callbackId = self:PushCallback(callbackFunc)
 
-  local vFileId = format("(%s)%s%s", self.remoteThread or "main", self.remoteAddress or "", self.filename)
-  if string.match(self.remoteAddress, "%(%a+%)") then
-    vFileId = format("%s%s", self.remoteAddress or "", self.filename)
-  end
+  local vFileId = format("(%s)server%s:%s", remoteThread or self.remoteThread or "main", remoteAddress, self.filename)
+
   self.request.msg = msg
   self.request.name = self.fullname
   self.request.callbackId = callbackId
-  self.request.remoteAddress = self.localAddress
-  -- if type(self.localAddress) == "table" then
-  --   self.logger.trace("activate on %s, msg:%s", vFileId, util.table_tostring(msg))
+  self.request.remoteAddress = localAddress
+  self.request.localAddress = remoteAddress
+
+  -- if remoteThread then
+  --   this is a client response
+  --   self.logger.trace("activate on %s, request:%s", vFileId, util.table_tostring(self.request))
   -- end
+
   local activate_result = NPL.activate(vFileId, self.request)
   -- handle memory leak
   if activate_result ~= 0 then
     -- activate_result = NPL.activate_with_timeout(self.MaxWaitSeconds, vFileId, msg)
     -- if activate_result ~= 0 then
-    callbackQueue[callbackId] = nil
+    if callbackId then
+      callbackQueue[callbackId] = nil
+    end
     self.logger.error("activate on %s failed %d, msg type:%s", vFileId, activate_result, msg.type)
   -- end
   end
