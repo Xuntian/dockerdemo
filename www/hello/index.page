@@ -1,1 +1,15 @@
-hello, world
+<?npl
+
+NPL.load("(gl)script/ide/System/Database/TableDatabase.lua");
+local TableDatabase = commonlib.gettable("System.Database.TableDatabase");
+
+local db = TableDatabase:new():connect("database/", function() end);
+db.test:insertOne({key="1"},{key="1",value="123"},resume)
+local _, data = yield()
+
+if data then
+	echo(commonlib.Json.Encode(data))
+else
+	echo('fail')
+end
+?>
